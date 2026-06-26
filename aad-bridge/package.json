@@ -1,0 +1,20 @@
+{
+  "name": "aad-bridged",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Centralized AAD token broker: one az login on a headless server, short-lived tokens to internal machines via kubelogin's --token-endpoint.",
+  "bin": {
+    "aad-bridged": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "build": "node build.js",
+    "check": "node --check server.js",
+    "test": "node --test test/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='lib/**' --test-coverage-include='server.js' test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * kubelogin-http-shim — a zero-dependency kubectl exec credential plugin.
+ *
+ * Drop-in replacement for `kubelogin get-token --login azurecli --token-endpoint ...`: it fetches a short-lived AAD access token from an aad-bridge HTTP endpoint and emits the ExecCredential JSON kubectl expects on stdout.
+ * kubectl caches the token by its expirationTimestamp, so the endpoint is hit roughly once per token lifetime per cluster.
+ *
+ * Usage:
+ *   kubelogin-http-shim get-token \
+ *     --login azurecli \
+ *     --server-id <aad-server-app-id> \
+ *     --token-endpoint https://aad-bridge.internal:8765/token \
+ *     --token-endpoint-header "Authorization=Bearer <secret>" \
+ *     --token-endpoint-ca-file /etc/aad-bridge/ca.pem
+ */
+
+const { parseArgs, validateArgs, ShimArgError } = require('../lib/args');
+const { fetchToken } = require('../lib/token');
+const { writeExecCredential, EXEC_INFO_ENV } = require('../lib/execcredential');
+
+const USAGE = `kubelogin-http-shim — kubectl exec credential plugin for aad-bridge
+
+Usage:
+  kubelogin-http-shim get-token [flags]
+
+Flags:
+  -l, --login <method>                      accepted for compatibility, ignored (always HTTP)
+      --server-id <app-id>                  AAD server application ID (required)
+  -t, --tenant-id <tenant>                  AAD tenant ID (optional)
+      --token-endpoint <url>                HTTP(S) token endpoint (required; env AAD_TOKEN_ENDPOINT)
+      --token-endpoint-method <GET|POST>    HTTP method (default POST)
+      --token-endpoint-header <key=value>   static header, repeatable (e.g. Authorization=Bearer ...)
+      --token-endpoint-header-file <path>   file of key=value headers, repeatable (keeps secrets out of argv)
+      --token-endpoint-ca-file <path>       PEM CA bundle to verify the endpoint's TLS cert
+      --token-endpoint-cert <path>          client cert for mTLS to the endpoint
+      --token-endpoint-key <path>           client key for mTLS to the endpoint
+      --token-endpoint-insecure-skip-tls-verify   skip TLS verification (test only)
+  -h, --help                                show this help
+  -v, --version                             show version
+`;
+
+function getVersion() {
+  try {
+    return require('../package.json').version;
+  } catch {
+    return '0.0.0';
+  }
+}
+
+async function main() {
+  const cfg = parseArgs(process.argv.slice(2));
+
+  if (cfg.help) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  if (cfg.version) {
+    process.stdout.write(`kubelogin-http-shim ${getVersion()}\n`);
+    return 0;
+  }
+
+  validateArgs(cfg);
+
+  const accessToken = await fetchToken(cfg);
+  writeExecCredential(accessToken, process.stdout, process.env[EXEC_INFO_ENV]);
+  return 0;
+}
+
+main()
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    const prefix = err instanceof ShimArgError ? 'kubelogin-http-shim: ' : 'kubelogin-http-shim: error: ';
+    process.stderr.write(`${prefix}${err.message}\n`);
+    process.exit(1);
+  });

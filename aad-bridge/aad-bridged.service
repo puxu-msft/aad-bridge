@@ -1,0 +1,40 @@
+# aad-bridged systemd unit.
+#
+# Install:
+#   sudo useradd --system --home /var/lib/aad-bridge --shell /usr/sbin/nologin aad-bridge || true
+#   sudo mkdir -p /var/lib/aad-bridge/.azure /etc/aad-bridge
+#   sudo chown -R aad-bridge:aad-bridge /var/lib/aad-bridge
+#   # one-time login (as the service user, so the token cache lands in the right place):
+#   sudo -u aad-bridge AZURE_CONFIG_DIR=/var/lib/aad-bridge/.azure /opt/aad-bridge/aad-bridge/scripts/login.sh
+#   sudo cp /opt/aad-bridge/aad-bridge/aad-bridged.service /etc/systemd/system/
+#   sudo cp /opt/aad-bridge/aad-bridge/aad-bridge.env.example /etc/aad-bridge/aad-bridge.env  # then edit
+#   sudo systemctl daemon-reload && sudo systemctl enable --now aad-bridged
+
+[Unit]
+Description=aad-bridge AAD token broker daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aad-bridge
+Group=aad-bridge
+EnvironmentFile=/etc/aad-bridge/aad-bridge.env
+Environment=AZURE_CONFIG_DIR=/var/lib/aad-bridge/.azure
+ExecStart=/usr/bin/node /opt/aad-bridge/aad-bridge/server.js
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/aad-bridge
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

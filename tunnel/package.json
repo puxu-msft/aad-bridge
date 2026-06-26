@@ -1,0 +1,34 @@
+{
+  "name": "tunnel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero-dependency reverse TCP tunnel: A listens, B dials out, traffic to A reaches B's provider.",
+  "bin": {
+    "tunnel-listen": "listen.js",
+    "tunnel-connect": "connect.js"
+  },
+  "files": [
+    "framing.js",
+    "listen.js",
+    "connect.js",
+    "build.js",
+    "example/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.js",
+    "prepublishOnly": "node build.js",
+    "test": "node --test test/framing.test.js test/e2e.test.js",
+    "test:coverage": "c8 --include=framing.js --include=listen.js --include=connect.js --reporter=text --reporter=html node --test test/framing.test.js test/e2e.test.js",
+    "listen": "node listen.js",
+    "connect": "node connect.js",
+    "provider": "node example/provider.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "devDependencies": {
+    "c8": "^11.0.0",
+    "esbuild": "^0.28.1"
+  }
+}

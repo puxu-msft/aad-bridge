@@ -1,0 +1,10 @@
+# Generated TLS material — contains PRIVATE KEYS. Never commit.
+certs/
+
+# Build output (regenerate with `npm run build`)
+dist/
+
+# Local az identity cache, if anyone points AZURE_CONFIG_DIR here
+.azure/
+node_modules/
+*.log

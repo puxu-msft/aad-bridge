@@ -1,0 +1,20 @@
+{
+  "name": "kubelogin-http-shim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zero-dependency kubectl exec credential plugin: a drop-in replacement for Azure kubelogin's azurecli/--token-endpoint path, talking to an aad-bridge HTTP token endpoint.",
+  "bin": {
+    "kubelogin-http-shim": "bin/kubelogin-http-shim"
+  },
+  "scripts": {
+    "start": "node bin/kubelogin-http-shim",
+    "build": "node build.js",
+    "check": "node --check bin/kubelogin-http-shim",
+    "test": "node --test test/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='lib/**' --test-coverage-include='bin/**' test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
