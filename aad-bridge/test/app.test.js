@@ -3,6 +3,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { createApp } = require('../lib/app');
 const { tmpDir, writeAzStub, testConfig } = require('./helpers');
 
@@ -118,6 +120,68 @@ test('app: keepalive mints each allowlisted resource on start', async () => {
     app.startKeepalive(); // tick() fires once immediately
     await new Promise((r) => setTimeout(r, 150));
     assert.ok(stub.count() >= 1);
+  } finally {
+    await app.shutdown();
+  }
+});
+
+test('app: auto-login triggers a single az login on re-auth, then clears state', async () => {
+  const dir = tmpDir();
+  const stub = writeAzStub(dir, { expiresInSec: 3600 }); // exits 0 for any args incl. `login`
+  const app = createApp(testConfig({ azPath: stub.path, secret: 's', allowedResources: new Set([AKS]), autoLogin: true }));
+  app.health.needsReauth = true;
+  await Promise.all([app.ensureReauth(), app.ensureReauth()]); // concurrent -> single-flight
+  assert.equal(stub.count(), 1);
+  assert.equal(app.health.needsReauth, false);
+  assert.equal(app.health.loginInProgress, false);
+});
+
+test('app: re-login targets the request tenant (multi-tenant)', async () => {
+  const dir = tmpDir();
+  const argf = path.join(dir, 'login-args');
+  const stub = path.join(dir, 'az.js');
+  fs.writeFileSync(
+    stub,
+    `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(argf)}, process.argv.slice(2).join(' '));process.stdout.write('ok');`,
+    { mode: 0o755 }
+  );
+  const app = createApp(testConfig({ azPath: stub, secret: 's', autoLogin: true }));
+  await app.ensureReauth('TENANT-X');
+  assert.match(fs.readFileSync(argf, 'utf8'), /login .*--tenant TENANT-X/);
+});
+
+test('app: auto-login disabled never launches login', () => {
+  const dir = tmpDir();
+  const stub = writeAzStub(dir, { expiresInSec: 3600 });
+  const app = createApp(testConfig({ azPath: stub.path, secret: 's', autoLogin: false }));
+  assert.equal(app.ensureReauth(), undefined);
+  assert.equal(stub.count(), 0);
+});
+
+test('app: /token blocks for the in-flight login, then succeeds on retry', async () => {
+  const dir = tmpDir();
+  const flag = path.join(dir, 'logged-in');
+  const stub = path.join(dir, 'az.js');
+  // get-access-token fails re-auth until `login` runs and drops the flag file.
+  fs.writeFileSync(
+    stub,
+    `#!/usr/bin/env node
+const fs=require('fs');const a=process.argv.slice(2);const f=${JSON.stringify(flag)};
+if(a.includes('login')){fs.writeFileSync(f,'1');process.stdout.write('ok');process.exit(0);}
+if(!fs.existsSync(f)){process.stderr.write('Please run: az login');process.exit(1);}
+process.stdout.write(JSON.stringify({accessToken:'TOK',expires_on:Math.floor(Date.now()/1000)+3600,tokenType:'Bearer'}));`,
+    { mode: 0o755 }
+  );
+  const app = createApp(testConfig({ azPath: stub, secret: 's', allowedResources: new Set([AKS]), autoLogin: true, loginTimeoutMs: 5000 }));
+  const port = await listen(app);
+  try {
+    const r = await request(port, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer s', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serverId: AKS }),
+    });
+    assert.equal(r.status, 200);
+    assert.match(JSON.parse(r.body).access_token, /^TOK/);
   } finally {
     await app.shutdown();
   }

@@ -12,7 +12,7 @@ const https = require('https');
 const fs = require('fs');
 
 const { TokenCache } = require('./token-cache');
-const { ReauthRequiredError } = require('./az');
+const { ReauthRequiredError, startInteractiveLogin } = require('./az');
 const { authorize } = require('./auth');
 const { createAudit } = require('./audit');
 const { parseTokenRequest } = require('./request');
@@ -24,6 +24,17 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+/** Resolve when `p` settles, or reject after `ms` — used to bound how long a request blocks on an in-flight login. */
+function withTimeout(p, ms) {
+  return Promise.race([
+    p,
+    new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error('login wait timeout')), ms);
+      t.unref();
+    }),
+  ]);
 }
 
 /** Build TLS options from configured cert/key/clientCA paths. */
@@ -71,8 +82,34 @@ function createApp(config) {
   const cache = new TokenCache(config);
   const audit = createAudit(config);
   const startedAt = Date.now();
-  const health = { loggedIn: null, lastMintAt: null, lastError: null, needsReauth: false };
+  const health = { loggedIn: null, lastMintAt: null, lastError: null, needsReauth: false, loginInProgress: false };
   const recent = []; // ring buffer of recent requests for /debug
+
+  // Single-flight interactive re-login. When the refresh token dies, kick off `az login` (browser, or device code) on the daemon host so it recovers without a human SSHing in. Concurrent re-auth errors collapse into one login. The tenant comes from the triggering request (multi-tenant: login must target it, or it lands in the home tenant).
+  let loginPromise = null;
+  function ensureReauth(tenant) {
+    if (!config.autoLogin || loginPromise) return loginPromise;
+    health.loginInProgress = true;
+    const target = tenant || config.loginTenant;
+    audit.lifecycle({ event: 'login', detail: `${config.loginUseDeviceCode ? 'device-code' : 'browser'} login started${target ? ' tenant=' + target : ''}` });
+    loginPromise = startInteractiveLogin(config, { tenant: target, onOutput: (s) => process.stdout.write(s) })
+      .then(() => {
+        cache.clear();
+        health.needsReauth = false;
+        health.loggedIn = true;
+        health.lastError = null;
+        audit.lifecycle({ event: 'login', detail: 'ok' });
+      })
+      .catch((err) => {
+        health.lastError = err.message;
+        audit.lifecycle({ event: 'login', detail: `fail ${err.message}` });
+      })
+      .finally(() => {
+        health.loginInProgress = false;
+        loginPromise = null;
+      });
+    return loginPromise;
+  }
 
   function recordRequest(rec) {
     recent.push(rec);
@@ -148,7 +185,19 @@ function createApp(config) {
     }
 
     try {
-      const entry = await cache.get({ resource, tenant, subscription });
+      let entry;
+      try {
+        entry = await cache.get({ resource, tenant, subscription });
+      } catch (err) {
+        if (!(err instanceof ReauthRequiredError) || !config.autoLogin) throw err;
+        // Refresh token died: launch (or join) the single-flight az login, block this request until it finishes or times out, then retry the mint once.
+        health.needsReauth = true;
+        health.loggedIn = false;
+        health.lastError = err.message;
+        const login = ensureReauth(tenant);
+        if (login) await withTimeout(login, config.loginTimeoutMs).catch(() => {});
+        entry = await cache.get({ resource, tenant, subscription }); // re-throws if login didn't fix it -> outer catch
+      }
       health.loggedIn = true;
       health.needsReauth = false;
       health.lastMintAt = nowIso();
@@ -166,10 +215,12 @@ function createApp(config) {
       health.needsReauth = reauth;
       health.lastError = err.message;
       audit.token({ ip, cn: auth.cn, resource, tenant, result: 'error', detail: err.message });
+      if (reauth) ensureReauth(tenant); // keep a login attempt alive in the background
       return sendJSON(res, reauth ? 503 : 502, {
         error: reauth ? 'server identity needs re-login' : 'failed to obtain token',
         detail: err.message,
         needs_login: reauth || undefined,
+        login_in_progress: reauth ? health.loginInProgress : undefined,
       });
     }
   }
@@ -212,6 +263,7 @@ function createApp(config) {
           health.loggedIn = false;
           health.needsReauth = reauth;
           health.lastError = err.message;
+          if (reauth) ensureReauth(); // recover unattended when the refresh token dies between dev sessions
           audit.lifecycle({ event: 'keepalive', detail: `fail ${resource}: ${err.message}` });
         }
       }
@@ -240,7 +292,7 @@ function createApp(config) {
     });
   }
 
-  return { server, handler, cache, audit, health, startKeepalive, shutdown, healthBody, debugBody };
+  return { server, handler, cache, audit, health, startKeepalive, shutdown, ensureReauth, healthBody, debugBody };
 }
 
 module.exports = { createApp, redactedConfig };

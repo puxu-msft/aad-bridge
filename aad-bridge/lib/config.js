@@ -32,7 +32,7 @@ const AKS_AAD_SERVER_APP_ID = '6dae42f8-4368-4678-94ff-3960e28e3630';
 const DEFAULT_ENV_FILE = 'aad-bridge.env';
 
 // Boolean CLI flags (take no value).
-const BOOLEAN_FLAGS = new Set(['insecure-no-auth', 'allow-any-resource', 'pass-tenant', 'no-env-file', 'no-access-log', 'help']);
+const BOOLEAN_FLAGS = new Set(['insecure-no-auth', 'allow-any-resource', 'pass-tenant', 'no-env-file', 'no-access-log', 'no-auto-login', 'device-code', 'help']);
 
 const HELP = `aad-bridged — centralized AAD token broker
 
@@ -59,6 +59,13 @@ Usage: node server.js [flags]   (every flag also has an env var; flags win)
     --az-path <path>           (AZ_PATH, default "az")
     --azure-config-dir <path>  (AZURE_CONFIG_DIR) where the daemon's az login lives
     --pass-tenant              (AZ_PASS_TENANT) forward request tenantId to az
+
+  Re-auth (refresh token expired / conditional access)
+    --no-auto-login            (AUTO_LOGIN=0) do NOT auto-run az login on re-auth (default: on)
+    --device-code              (LOGIN_USE_DEVICE_CODE=1) use device code instead of the browser (headless host)
+    --login-scope <scope>      (LOGIN_SCOPE) scope passed to az login (default: plain login)
+    --login-tenant <id>        (LOGIN_TENANT) tenant for re-login; defaults to the request's tenantId (multi-tenant)
+    --login-timeout-ms <n>     (LOGIN_TIMEOUT_MS, default 120000) block requests up to this long for an in-flight login
 
   Caching / lifecycle
     --refresh-skew-seconds <n> (REFRESH_SKEW_SECONDS, default 300)
@@ -157,6 +164,11 @@ function loadConfig(argv = process.argv.slice(2), env = process.env) {
     azPath: expandValue(pick('az-path', 'AZ_PATH') || 'az', env),
     azureConfigDir: expandValue(pick('azure-config-dir', 'AZURE_CONFIG_DIR') || '', env),
     passTenant: parseBool(pick('pass-tenant', 'AZ_PASS_TENANT'), false),
+    autoLogin: !cli['no-auto-login'] && parseBool(pick(undefined, 'AUTO_LOGIN'), true),
+    loginUseDeviceCode: parseBool(pick('device-code', 'LOGIN_USE_DEVICE_CODE'), false),
+    loginScope: pick('login-scope', 'LOGIN_SCOPE') || '',
+    loginTenant: pick('login-tenant', 'LOGIN_TENANT') || '',
+    loginTimeoutMs: parseNumber(pick('login-timeout-ms', 'LOGIN_TIMEOUT_MS'), 120_000),
     tokenTimeoutMs: parseNumber(pick('token-timeout-ms', 'TOKEN_TIMEOUT_MS'), 60_000),
     refreshSkewSeconds: parseNumber(pick('refresh-skew-seconds', 'REFRESH_SKEW_SECONDS'), 300),
     keepaliveMinutes: parseNumber(pick('keepalive-minutes', 'KEEPALIVE_MINUTES'), 360),

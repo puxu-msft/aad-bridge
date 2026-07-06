@@ -61,6 +61,7 @@ function printBanner() {
   console.log(`  auth       : ${authModeLabel()}`);
   console.log(`  az config  : ${config.azureConfigDir || '(default ~/.azure)'}`);
   console.log(`  keepalive  : ${config.keepaliveMinutes ? config.keepaliveMinutes + 'm' : 'off'}`);
+  console.log(`  auto-login : ${config.autoLogin ? (config.loginUseDeviceCode ? 'on (device code)' : 'on (browser)') : 'off'}`);
   console.log(`  access log : ${config.accessLog ? 'on' : 'off'}`);
   if (!config.tls) {
     console.warn('  WARNING: serving plain HTTP — tokens cross the wire unencrypted. Use TLS or a trusted reverse proxy.');

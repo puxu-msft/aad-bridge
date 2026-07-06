@@ -182,6 +182,11 @@ Key ones:
 | `--keepalive-minutes` / `KEEPALIVE_MINUTES` | `360` | Keep the refresh token warm (0 = off) |
 | `--audit-log` / `AUDIT_LOG` | stdout | Per-request audit log path |
 | `--cache-max-entries` / `CACHE_MAX_ENTRIES` | `256` | LRU cap on the token cache (0 = unbounded) |
+| `--no-auto-login` / `AUTO_LOGIN=0` | on | Stop auto-running `az login` when the refresh token expires |
+| `--device-code` / `LOGIN_USE_DEVICE_CODE` | browser | Use device code for re-login instead of the browser |
+| `--login-scope` / `LOGIN_SCOPE` | plain | Scope passed to the re-login `az login` |
+| `--login-tenant` / `LOGIN_TENANT` | request's tenantId | Tenant for re-login (multi-tenant — avoids landing in the home tenant) |
+| `--login-timeout-ms` / `LOGIN_TIMEOUT_MS` | `120000` | How long a request blocks on an in-flight re-login before 503 |
 | `--no-access-log` / `ACCESS_LOG=0` | on | Disable the per-request access log |
 | `--insecure-no-auth` / `ALLOW_NO_AUTH` | off | **DEV ONLY** — disable caller auth |
 | `--allow-any-resource` / `ALLOW_ANY_RESOURCE` | off | **DEV ONLY** — skip the resource allowlist |
@@ -206,7 +211,7 @@ AZ_PATH=az node aad-bridge/server.js \
 
 ## Operations
 
-- **Re-login.** When the refresh token dies (conditional access / ~90-day idle / MFA), `/token` returns `503 {"needs_login":true}` and `/healthz` reports `needs_login`. Re-run `scripts/login.sh` as the service user. Wire `/healthz` into monitoring.
+- **Re-login.** When the refresh token dies (conditional access / ~90-day idle / MFA), the daemon **auto-launches `az login` on its own host** — browser by default, or device code with `--device-code` for a headless host. It's single-flight, and **incoming `/token` requests block on the in-flight login** (up to `--login-timeout-ms`, default 120s) then retry the mint, so a `kubectl` call started mid-expiry succeeds once you finish the browser sign-in instead of failing. Only on timeout/failure does it return `503 {"needs_login":true}`. Disable with `--no-auto-login` and recover manually via `scripts/login.sh`. Re-login uses the tenant from the request's `tenantId` (or `LOGIN_TENANT`), so a multi-tenant identity lands in the cluster's tenant rather than the home tenant.
 - **Audit.** With one shared identity, **Azure-side logs cannot distinguish developers** — every `kubectl` action is attributed to the one principal, and Kubernetes RBAC sees that principal's groups. The daemon's audit log (caller IP + mTLS CN → resource) is your *only* per-developer record. Retain and protect it. If per-developer Azure attribution becomes a requirement, move to the per-developer identity model (the wire contract is unchanged).
 - **Blast radius.** Tokens are short-lived and resource-scoped; a leaked one expires in minutes and only works against allowlisted resources. Keep `ALLOWED_RESOURCES` minimal.
 - **Network.** Bind to the internal interface and firewall `/token` to the dev subnet. Never expose to the internet.
@@ -239,7 +244,7 @@ On native Windows, run `az login --use-device-code` directly, generate certs wit
 Zero-dependency suite built on Node's built-in test runner and coverage:
 
 ```bash
-npm test            # node --test, 52 tests
+npm test            # node --test, 56 tests
 npm run test:coverage
 ```
 

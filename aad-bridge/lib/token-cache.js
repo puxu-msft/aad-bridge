@@ -67,6 +67,11 @@ class TokenCache {
     }
   }
 
+  /** Drop all cached tokens (e.g. after a re-login so the next request re-mints). */
+  clear() {
+    this.entries.clear();
+  }
+
   /** Metadata snapshot for /debug — token values are deliberately omitted. */
   snapshot() {
     const nowSec = Math.floor(Date.now() / 1000);

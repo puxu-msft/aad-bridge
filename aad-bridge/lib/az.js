@@ -5,7 +5,7 @@
  * The headless server holds a single interactive `az login`; this shells out to mint scoped access tokens, letting the Azure CLI own the MSAL refresh-token lifecycle.
  */
 
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 
 const isWindows = process.platform === 'win32';
 
@@ -119,4 +119,35 @@ function resolveExpiry(parsed) {
   return 0;
 }
 
-module.exports = { getAccessToken, ReauthRequiredError, resolveAzInvocation, quoteForCmd };
+/**
+ * Run an interactive `az login` to recover from an expired/invalid refresh token.
+ * On a host with a desktop this opens the default browser; pass loginUseDeviceCode for a headless host.
+ * A tenant must be targeted when the identity spans multiple tenants, or login lands in the home tenant and the cluster's token stays invalid.
+ * Resolves when login succeeds; rejects on non-zero exit. Output (incl. any device code) is streamed to onOutput.
+ */
+function startInteractiveLogin(config, { tenant, onOutput } = {}) {
+  const args = ['login'];
+  if (config.loginUseDeviceCode) args.push('--use-device-code');
+  const t = tenant || config.loginTenant;
+  if (t) args.push('--tenant', t);
+  if (config.loginScope) args.push('--scope', config.loginScope);
+
+  const azEnv = { ...process.env };
+  if (config.azureConfigDir) azEnv.AZURE_CONFIG_DIR = config.azureConfigDir;
+
+  const inv = resolveAzInvocation(config.azPath, args);
+  return new Promise((resolve, reject) => {
+    const cp = spawn(inv.file, inv.args, { env: azEnv, ...inv.opts });
+    let buf = '';
+    const cap = (d) => {
+      buf += d;
+      if (onOutput) onOutput(String(d));
+    };
+    cp.stdout.on('data', cap);
+    cp.stderr.on('data', cap);
+    cp.on('error', reject);
+    cp.on('close', (code) => (code === 0 ? resolve(buf) : reject(new Error(`az login exited ${code}: ${buf.slice(-400).trim()}`))));
+  });
+}
+
+module.exports = { getAccessToken, ReauthRequiredError, resolveAzInvocation, quoteForCmd, startInteractiveLogin };
