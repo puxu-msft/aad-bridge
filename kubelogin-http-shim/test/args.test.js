@@ -153,3 +153,74 @@ test('validateArgs rejects a malformed header', () => {
   const { cfg } = parseQuiet(['get-token', '--server-id', AKS, '--token-endpoint', EP, '--token-endpoint-header', 'noequals']);
   assert.throws(() => validateArgs(cfg), ShimArgError);
 });
+
+test('token cache defaults: enabled, default dir, skew 300', () => {
+  const { cfg } = parseQuiet(['get-token', '--server-id', AKS, '--token-endpoint', EP]);
+  validateArgs(cfg);
+  assert.equal(cfg.disableTokenCache, false);
+  assert.equal(cfg.tokenCacheDir, null); // null => cache.js resolves the default location
+  assert.equal(cfg.tokenCacheRefreshSkew, 300);
+});
+
+test('parses cache flags: dir, disable, refresh-skew', () => {
+  const { cfg } = parseQuiet([
+    'get-token', '--server-id', AKS, '--token-endpoint', EP,
+    '--token-cache-dir', '/tmp/shim-cache',
+    '--disable-token-cache',
+    '--token-cache-refresh-skew', '60',
+  ]);
+  validateArgs(cfg);
+  assert.equal(cfg.tokenCacheDir, '/tmp/shim-cache');
+  assert.equal(cfg.disableTokenCache, true);
+  assert.equal(cfg.tokenCacheRefreshSkew, 60);
+});
+
+test('an empty --token-cache-dir disables caching (sentinel for cache.js)', () => {
+  const { cfg } = parseQuiet(['get-token', '--server-id', AKS, '--token-endpoint', EP, '--token-cache-dir=']);
+  assert.equal(cfg.tokenCacheDir, '');
+});
+
+test('AAD_TOKEN_CACHE_DIR set-to-empty disables, symmetric with the CLI; unset uses default', () => {
+  const prev = Object.prototype.hasOwnProperty.call(process.env, 'AAD_TOKEN_CACHE_DIR')
+    ? process.env.AAD_TOKEN_CACHE_DIR
+    : undefined;
+  try {
+    process.env.AAD_TOKEN_CACHE_DIR = ''; // explicitly empty
+    assert.equal(parseQuiet(['get-token', '--server-id', AKS, '--token-endpoint', EP]).cfg.tokenCacheDir, '');
+    delete process.env.AAD_TOKEN_CACHE_DIR; // unset
+    assert.equal(parseQuiet(['get-token', '--server-id', AKS, '--token-endpoint', EP]).cfg.tokenCacheDir, null);
+  } finally {
+    if (prev === undefined) delete process.env.AAD_TOKEN_CACHE_DIR;
+    else process.env.AAD_TOKEN_CACHE_DIR = prev;
+  }
+});
+
+test('validateArgs rejects a negative or non-numeric refresh skew', () => {
+  const { cfg: a } = parseQuiet(['get-token', '--server-id', AKS, '--token-endpoint', EP, '--token-cache-refresh-skew', '-5']);
+  assert.throws(() => validateArgs(a), ShimArgError);
+  const { cfg: b } = parseQuiet(['get-token', '--server-id', AKS, '--token-endpoint', EP, '--token-cache-refresh-skew', 'soon']);
+  assert.throws(() => validateArgs(b), ShimArgError);
+});
+
+test('cache env vars seed the defaults', () => {
+  const saved = {
+    dir: process.env.AAD_TOKEN_CACHE_DIR,
+    disable: process.env.AAD_DISABLE_TOKEN_CACHE,
+    skew: process.env.AAD_TOKEN_CACHE_REFRESH_SKEW,
+  };
+  process.env.AAD_TOKEN_CACHE_DIR = '/env/cache';
+  process.env.AAD_DISABLE_TOKEN_CACHE = '1';
+  process.env.AAD_TOKEN_CACHE_REFRESH_SKEW = '90';
+  try {
+    const { cfg } = parseQuiet(['get-token', '--server-id', AKS, '--token-endpoint', EP]);
+    validateArgs(cfg);
+    assert.equal(cfg.tokenCacheDir, '/env/cache');
+    assert.equal(cfg.disableTokenCache, true);
+    assert.equal(cfg.tokenCacheRefreshSkew, 90);
+  } finally {
+    for (const [k, v] of [['AAD_TOKEN_CACHE_DIR', saved.dir], ['AAD_DISABLE_TOKEN_CACHE', saved.disable], ['AAD_TOKEN_CACHE_REFRESH_SKEW', saved.skew]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});

@@ -12,6 +12,10 @@ const env = require('./env');
 const SUPPORTED_METHODS = new Set(['GET', 'POST']);
 const DEFAULT_METHOD = 'POST';
 
+// Seconds before real expiry at which a cached token is considered stale and refreshed.
+// Matches aad-bridge's server-side refreshSkewSeconds default so both layers agree on the safety margin.
+const DEFAULT_CACHE_REFRESH_SKEW = 300;
+
 // Flags we consume that take a following value.
 const VALUE_FLAGS = new Map([
   ['--login', 'login'],
@@ -24,6 +28,8 @@ const VALUE_FLAGS = new Map([
   ['--token-endpoint-ca-file', 'caFile'],
   ['--token-endpoint-cert', 'certFile'],
   ['--token-endpoint-key', 'keyFile'],
+  ['--token-cache-dir', 'tokenCacheDir'],
+  ['--token-cache-refresh-skew', 'tokenCacheRefreshSkew'],
 ]);
 
 // Repeatable value flags (accumulate into an array).
@@ -35,6 +41,7 @@ const ARRAY_FLAGS = new Map([
 // Boolean flags we consume (no following value).
 const BOOL_FLAGS = new Map([
   ['--token-endpoint-insecure-skip-tls-verify', 'insecureSkipTLSVerify'],
+  ['--disable-token-cache', 'disableTokenCache'],
 ]);
 
 // Known upstream kubelogin boolean flags we ignore but must NOT treat as value-taking when tolerating unknown flags (so we don't swallow the next arg).
@@ -65,6 +72,10 @@ function parseArgs(argv, warn = (msg) => process.stderr.write(`${msg}\n`)) {
     certFile: '',
     keyFile: '',
     insecureSkipTLSVerify: false,
+    // Client-side token cache. dir null => default location; '' => explicitly disabled.
+    tokenCacheDir: envCacheDir(),
+    disableTokenCache: envFlag(env.DISABLE_TOKEN_CACHE),
+    tokenCacheRefreshSkew: env.get(env.TOKEN_CACHE_REFRESH_SKEW) || DEFAULT_CACHE_REFRESH_SKEW,
     help: false,
     version: false,
   };
@@ -174,11 +185,27 @@ function validateArgs(cfg) {
       throw new ShimArgError(`token endpoint header ${JSON.stringify(h)} is not in key=value format`);
     }
   }
+  const skew = Number(cfg.tokenCacheRefreshSkew);
+  if (!Number.isFinite(skew) || skew < 0) {
+    throw new ShimArgError(`--token-cache-refresh-skew must be a non-negative number, got ${JSON.stringify(cfg.tokenCacheRefreshSkew)}`);
+  }
+  cfg.tokenCacheRefreshSkew = Math.floor(skew);
   return cfg;
 }
 
 function parseBool(v) {
   return v === '' || /^(1|true|yes|on)$/i.test(v);
+}
+
+/** Read a boolean env var, defaulting to false when unset (unlike parseBool, which treats '' as true for inline `--flag=`). */
+function envFlag(name) {
+  const v = env.get(name);
+  return v !== '' && parseBool(v);
+}
+
+/** Resolve the cache dir from env, distinguishing unset (=> null, default dir) from set-to-empty (=> '', disabled), so AAD_TOKEN_CACHE_DIR="" disables just like --token-cache-dir="". */
+function envCacheDir() {
+  return env.has(env.TOKEN_CACHE_DIR) ? env.get(env.TOKEN_CACHE_DIR) : null;
 }
 
 class ShimArgError extends Error {}

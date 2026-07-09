@@ -18,6 +18,7 @@
 
 const { parseArgs, validateArgs, ShimArgError } = require('../lib/args');
 const { fetchToken } = require('../lib/token');
+const { readCache, writeCache } = require('../lib/cache');
 const { writeExecCredential, EXEC_INFO_ENV } = require('../lib/execcredential');
 
 const USAGE = `kubelogin-http-shim — kubectl exec credential plugin for aad-bridge
@@ -37,6 +38,9 @@ Flags:
       --token-endpoint-cert <path>          client cert for mTLS to the endpoint
       --token-endpoint-key <path>           client key for mTLS to the endpoint
       --token-endpoint-insecure-skip-tls-verify   skip TLS verification (test only)
+      --token-cache-dir <path>              disk cache dir (env AAD_TOKEN_CACHE_DIR; default ~/.kube/cache/kubelogin-http-shim; "" disables)
+      --disable-token-cache                 disable the client-side disk cache (env AAD_DISABLE_TOKEN_CACHE)
+      --token-cache-refresh-skew <seconds>  refresh a cached token this many seconds before expiry (default 300)
   -h, --help                                show this help
   -v, --version                             show version
 `;
@@ -63,7 +67,14 @@ async function main() {
 
   validateArgs(cfg);
 
-  const accessToken = await fetchToken(cfg);
+  // Serve from the local disk cache when a still-valid token is present, so a
+  // repeated `kubectl` invocation (each a fresh process) skips the round-trip to
+  // aad-bridge until the token nears expiry. A miss falls through to a live fetch.
+  let accessToken = readCache(cfg);
+  if (!accessToken) {
+    accessToken = await fetchToken(cfg);
+    writeCache(cfg, accessToken);
+  }
   writeExecCredential(accessToken, process.stdout, process.env[EXEC_INFO_ENV]);
   return 0;
 }

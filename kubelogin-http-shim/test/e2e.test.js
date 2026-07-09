@@ -3,6 +3,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
+const os = require('os');
+const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -21,8 +23,13 @@ function stubServer(handler) {
 }
 
 function run(args, env = {}) {
+  // Isolate the disk cache per call so caching (now on by default) never touches
+  // the real ~/.kube/cache and tests stay hermetic. Callers can pin AAD_TOKEN_CACHE_DIR
+  // (e.g. to share a cache across two runs) via env, which wins over this default.
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-e2e-'));
+  const childEnv = { ...process.env, AAD_TOKEN_CACHE_DIR: cacheDir, ...env };
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [BIN, ...args], { env: { ...process.env, ...env } });
+    const child = spawn(process.execPath, [BIN, ...args], { env: childEnv });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (c) => (stdout += c));
@@ -117,4 +124,96 @@ test('end-to-end: missing --server-id fails fast', async () => {
   const { code, stderr } = await run(['get-token', '--token-endpoint', 'http://127.0.0.1:1/token']);
   assert.equal(code, 1);
   assert.match(stderr, /--server-id is required/);
+});
+
+test('end-to-end: a second call is served from the disk cache, skipping the endpoint', async () => {
+  let hits = 0;
+  const { server, port } = await stubServer((req, res) => {
+    hits += 1;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ access_token: 'cached-tok', expires_on: 1893456000 })); // far-future expiry
+  });
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-e2e-hit-'));
+  const args = ['get-token', '--server-id', AKS, '--token-endpoint', `http://127.0.0.1:${port}/token`];
+  try {
+    const first = await run(args, { AAD_TOKEN_CACHE_DIR: cacheDir });
+    const second = await run(args, { AAD_TOKEN_CACHE_DIR: cacheDir });
+    assert.equal(first.code, 0);
+    assert.equal(second.code, 0);
+    assert.equal(JSON.parse(first.stdout).status.token, 'cached-tok');
+    assert.equal(JSON.parse(second.stdout).status.token, 'cached-tok');
+    assert.equal(hits, 1, 'the second invocation must be served from cache');
+  } finally {
+    server.close();
+  }
+});
+
+test('end-to-end: --disable-token-cache hits the endpoint on every call', async () => {
+  let hits = 0;
+  const { server, port } = await stubServer((req, res) => {
+    hits += 1;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ access_token: 'tok', expires_on: 1893456000 }));
+  });
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-e2e-nocache-'));
+  const args = ['get-token', '--server-id', AKS, '--token-endpoint', `http://127.0.0.1:${port}/token`, '--disable-token-cache'];
+  try {
+    await run(args, { AAD_TOKEN_CACHE_DIR: cacheDir });
+    await run(args, { AAD_TOKEN_CACHE_DIR: cacheDir });
+    assert.equal(hits, 2, 'caching disabled: both invocations hit the endpoint');
+  } finally {
+    server.close();
+  }
+});
+
+test('end-to-end: a cached token inside the refresh skew is refetched and the file rewritten', async () => {
+  let hits = 0;
+  const { server, port } = await stubServer((req, res) => {
+    hits += 1;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    // Token has ~120s of life; with a 300s skew it's "stale" the moment it lands, so every call refetches.
+    res.end(JSON.stringify({ access_token: `tok-${hits}`, expires_in: 120 }));
+  });
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-e2e-stale-'));
+  const args = ['get-token', '--server-id', AKS, '--token-endpoint', `http://127.0.0.1:${port}/token`, '--token-cache-refresh-skew', '300'];
+  try {
+    const first = await run(args, { AAD_TOKEN_CACHE_DIR: cacheDir });
+    const second = await run(args, { AAD_TOKEN_CACHE_DIR: cacheDir });
+    assert.equal(JSON.parse(first.stdout).status.token, 'tok-1');
+    assert.equal(JSON.parse(second.stdout).status.token, 'tok-2'); // refetched, not the stale cached one
+    assert.equal(hits, 2, 'a within-skew token must be refreshed, not served from cache');
+    // The cache file was written both times (best-effort persistence of the fresh token).
+    const files = fs.readdirSync(cacheDir).filter((f) => f.endsWith('.json'));
+    assert.equal(files.length, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test('end-to-end: a corrupt cache file degrades to a live fetch and is overwritten', async () => {
+  let hits = 0;
+  const { server, port } = await stubServer((req, res) => {
+    hits += 1;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ access_token: 'fresh-tok', expires_on: 1893456000 }));
+  });
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-e2e-corrupt-'));
+  const args = ['get-token', '--server-id', AKS, '--token-endpoint', `http://127.0.0.1:${port}/token`];
+  try {
+    // Seed the exact cache file the shim will look for with garbage.
+    const first = await run(args, { AAD_TOKEN_CACHE_DIR: cacheDir });
+    assert.equal(hits, 1);
+    const file = fs.readdirSync(cacheDir).find((f) => f.endsWith('.json'));
+    fs.writeFileSync(path.join(cacheDir, file), 'garbage{not json');
+
+    const second = await run(args, { AAD_TOKEN_CACHE_DIR: cacheDir });
+    assert.equal(second.code, 0);
+    assert.equal(JSON.parse(second.stdout).status.token, 'fresh-tok');
+    assert.equal(hits, 2, 'corrupt cache must fall back to a live fetch');
+    assert.match(second.stderr, /corrupt/);
+    // And the corrupt file was replaced with a valid entry.
+    assert.doesNotThrow(() => JSON.parse(fs.readFileSync(path.join(cacheDir, file), 'utf8')));
+  } finally {
+    server.close();
+  }
 });
